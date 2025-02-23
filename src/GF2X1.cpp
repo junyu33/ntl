@@ -1747,7 +1747,7 @@ static inline __int128 gf2x_to_int128(const GF2X& x) {
     return reinterpret_cast<__int128>(result);
 
 #elif __riscv
-		__uint128_t result;
+    __uint128_t result = 0;
     for (long i = 0; i < rep.length() && i < 2; i++) {
         result |= ((__int128)rep[i] << (64 * i));
     }
