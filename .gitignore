@@ -4,4 +4,4 @@ compile_commands.json
 # Ignore all files except for .c, .cpp, .h, .hpp, .txt, and .html
 *.o
 *.a
-
+/.cache
