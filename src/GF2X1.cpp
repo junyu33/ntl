@@ -1746,7 +1746,8 @@ static inline __int128 gf2x_to_int128(const GF2X& x) {
     }
     return reinterpret_cast<__int128>(result);
 
-#elif __riscv__
+#elif __riscv
+		__uint128_t result;
     for (long i = 0; i < rep.length() && i < 2; i++) {
         result |= ((__int128)rep[i] << (64 * i));
     }
@@ -1810,7 +1811,7 @@ void MulMod(GF2X& c, const GF2X& a, const GF2X& b, const GF2XModulus& F) {
         __int128 res = _mm_setzero_si128();
 #elif  __aarch64__
         __int128 res = vdupq_n_u64(0);
-#elif  __riscv__
+#elif  __riscv
         __int128 res = 0;
 #endif
 
