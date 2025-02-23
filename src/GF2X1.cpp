@@ -1676,16 +1676,151 @@ void div(GF2X& q, const GF2X& a, const GF2XModulus& F)
    }
 }
 
+#include "gf2e_mult_generated.h"
 
-void MulMod(GF2X& c, const GF2X& a, const GF2X& b, const GF2XModulus& F)
-{
-   if (F.n < 0) LogicError("MulMod: uninitialized modulus");
+// Function pointer types
+typedef void (*GFMulFunc64)(__int128, __int128, uint64_t*);  // For m = 8 to 64
+typedef void (*GFMulFunc127)(__int128, __int128, __uint128_t*); // For m = 65 to 127
+typedef void (*GFMulFunc128)(__int128, __int128, __int128*) ; // For m = 128
 
-   NTL_GF2XRegister(t);
-   mul(t, a, b);
-   rem(c, t, F);
+// Function pointer tables
+static GFMulFunc64 mul_rem_funcs_8_to_64[65] = {
+    nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, // 0-7
+    gfmul8, gfmul9, gfmul10, gfmul11, gfmul12, gfmul13, gfmul14, gfmul15,    // 8-15
+    gfmul16, gfmul17, gfmul18, gfmul19, gfmul20, gfmul21, gfmul22, gfmul23, // 16-23
+    gfmul24, gfmul25, gfmul26, gfmul27, gfmul28, gfmul29, gfmul30, gfmul31, // 24-31
+    gfmul32, gfmul33, gfmul34, gfmul35, gfmul36, gfmul37, gfmul38, gfmul39, // 32-39
+    gfmul40, gfmul41, gfmul42, gfmul43, gfmul44, gfmul45, gfmul46, gfmul47, // 40-47
+    gfmul48, gfmul49, gfmul50, gfmul51, gfmul52, gfmul53, gfmul54, gfmul55, // 48-55
+    gfmul56, gfmul57, gfmul58, gfmul59, gfmul60, gfmul61, gfmul62, gfmul63, // 56-63
+    gfmul64 // 64
+};
+
+static GFMulFunc127 mul_rem_funcs_65_to_127[64] = {
+    gfmul65, gfmul66, gfmul67, gfmul68, gfmul69, gfmul70, gfmul71,         // 65-71
+    gfmul72, gfmul73, gfmul74, gfmul75, gfmul76, gfmul77, gfmul78, gfmul79, // 72-79
+    gfmul80, gfmul81, gfmul82, gfmul83, gfmul84, gfmul85, gfmul86, gfmul87, // 80-87
+    gfmul88, gfmul89, gfmul90, gfmul91, gfmul92, gfmul93, gfmul94, gfmul95, // 88-95
+    gfmul96, gfmul97, gfmul98, gfmul99, gfmul100, gfmul101, gfmul102, gfmul103, // 96-103
+    gfmul104, gfmul105, gfmul106, gfmul107, gfmul108, gfmul109, gfmul110, gfmul111, // 104-111
+    gfmul112, gfmul113, gfmul114, gfmul115, gfmul116, gfmul117, gfmul118, gfmul119, // 112-119
+    gfmul120, gfmul121, gfmul122, gfmul123, gfmul124, gfmul125, gfmul126, gfmul127, // 120-127
+};
+
+static GFMulFunc128 mul_rem_func_128 = gfmul128;
+
+// Scalar fallback for m < 8 or m > 128
+static void mul_rem_scalar(GF2X& c, const GF2X& a, const GF2X& b, const GF2XModulus& F) {
+    NTL_GF2XRegister(t);
+    mul(t, a, b); // NTL default (replace with your scalar formula if available)
+    rem(c, t, F);
 }
 
+// Convert GF2X to __int128
+static inline __int128 gf2x_to_int128(const GF2X& x) {
+    const auto& rep = x.xrep; // vec_GF2, array of uint64_t
+    long len = rep.length();
+
+#ifdef __x86_64__
+    // x86-64: SSE2
+    __m128i result;
+    if (len == 0) {
+        result = _mm_setzero_si128();
+    } else if (len == 1) {
+        result = _mm_set_epi64x(0, rep[0]);
+    } else {
+        result = _mm_set_epi64x(len > 1 ? rep[1] : 0, rep[0]);
+    }
+    return reinterpret_cast<__int128>(result);
+
+#elif __aarch64__
+    // ARM64: Neon
+    uint64x2_t result;
+    if (len == 0) {
+        result = vdupq_n_u64(0); // Zero vector
+    } else if (len == 1) {
+        result = vsetq_lane_u64(rep[0], vdupq_n_u64(0), 0); // Low 64 bits, zero high
+    } else {
+        uint64_t tmp[2] = {rep[0], len > 1 ? rep[1] : 0};
+        result = vld1q_u64(tmp); // Load 128 bits
+    }
+    return reinterpret_cast<__int128>(result);
+
+#elif __riscv__
+    for (long i = 0; i < rep.length() && i < 2; i++) {
+        result |= ((__int128)rep[i] << (64 * i));
+    }
+    return result;
+#endif
+    LogicError("Unsupported architecture");
+}
+
+// Convert uint64_t* to GF2X (m <= 64)
+static inline void uint64_to_gf2x(GF2X& c, uint64_t* res, long m) {
+    c.SetMaxLength(1); // 64 bits max
+    c.xrep.SetLength(1);
+    c.xrep[0] = *res;
+    c.normalize();
+}
+
+// Convert __uint128_t* or __int128* to GF2X (m >= 65)
+static inline void uint128_to_gf2x(GF2X& c, __uint128_t* res, long m) {
+    c.SetMaxLength(2); // 128 bits max
+    c.xrep.SetLength(2);
+    c.xrep[0] = (uint64_t)(*res & 0xFFFFFFFFFFFFFFFFULL); // Low 64 bits
+    c.xrep[1] = (uint64_t)(*res >> 64);                  // High 64 bits
+    c.normalize();
+}
+
+// Overload for __int128* (m = 128)
+static inline void int128_to_gf2x(GF2X& c, __int128* res, long m) {
+    __uint128_t ures = (__uint128_t)*res; // Cast to unsigned for consistent bit handling
+    c.SetMaxLength(2);
+    c.xrep.SetLength(2);
+    c.xrep[0] = (uint64_t)(ures & 0xFFFFFFFFFFFFFFFFULL);
+    c.xrep[1] = (uint64_t)(ures >> 64);
+    c.normalize();
+}
+
+void MulMod(GF2X& c, const GF2X& a, const GF2X& b, const GF2XModulus& F) {
+    if (F.n < 0) LogicError("MulMod: uninitialized modulus");
+
+    long m = F.n; // Degree of modulus
+
+    if (m >= 8 && m <= 64) {
+        // Use gfmulX with uint64_t* output
+        __int128 a_int = gf2x_to_int128(a);
+        __int128 b_int = gf2x_to_int128(b);
+        uint64_t res = 0; // Single 64-bit result
+        mul_rem_funcs_8_to_64[m](a_int, b_int, &res);
+        uint64_to_gf2x(c, &res, m);
+    } else if (m >= 65 && m <= 127) {
+        // Use gfmulX with __uint128_t* output
+        __int128 a_int = gf2x_to_int128(a);
+        __int128 b_int = gf2x_to_int128(b);
+        __uint128_t res = 0; // 128-bit unsigned result
+        mul_rem_funcs_65_to_127[m - 65](a_int, b_int, &res);
+        uint128_to_gf2x(c, &res, m);
+    } else if (m == 128) {
+        // Special case for m = 128 with __int128* output
+        __int128 a_int = gf2x_to_int128(a);
+        __int128 b_int = gf2x_to_int128(b);
+
+#ifdef __x86_64__
+        __int128 res = _mm_setzero_si128();
+#elif  __aarch64__
+        __int128 res = vdupq_n_u64(0);
+#elif  __riscv__
+        __int128 res = 0;
+#endif
+
+        mul_rem_func_128(a_int, b_int, &res);
+        int128_to_gf2x(c, &res, m);
+    } else {
+        // Scalar fallback for m < 8 or m > 128
+        mul_rem_scalar(c, a, b, F);
+    }
+}
 
 void SqrMod(GF2X& c, const GF2X& a, const GF2XModulus& F)
 {
